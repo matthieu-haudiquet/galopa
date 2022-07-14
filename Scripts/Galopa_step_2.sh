@@ -3,7 +3,7 @@
 ## This script is intended to work with the associated R Script R_MOAASR
 ## Tested and automated for gembases 
 ## Simply launch it on maestro cluster with:
-## > ./2_maestro_MOAASR.sh
+## > ./Galopa_step_2.sh
 ## author: Matthieu Haudiquet 
 ## date: 01/2022
 
