@@ -1,0 +1,281 @@
+---
+title: "MOAASR"
+author: Matthieu Haudiquet
+output: html_notebook
+editor_options: 
+  chunk_output_type: inline
+---
+
+This is an [R Markdown](http://rmarkdown.rstudio.com) Notebook. When you execute code within the notebook, the results appear beneath the code.
+
+
+# Step 1 
+
+This step's only input is:
+- the gembase directory containing the trees
+- the gembase directory containing the pangenome
+- the working directory 
+
+```{r}
+library(phytools, quietly = T, warn.conflicts = F ) # Read/midpoint/write trees
+library(data.table, quietly = T, warn.conflicts = F ) # Faster read/write functions
+setDTthreads(threads = 0) # Use all threads for data.table
+library(dplyr, quietly = T, warn.conflicts = F ) # For pipes and some usefull functions
+library(furrr, quietly = T, warn.conflicts = F) # Parallel computing
+plan(multisession,workers = availableCores())  
+
+# Directory containing trees of gembases
+trees_dir="/Volumes/gem-calc/Microbial_0321/Trees_Microbial_0321" 
+# Directory containing pangenomes of gembases
+pangenome_dir="/Volumes/gem-calc/Microbial_0321/CorePan_Microbial_0321" 
+# Directory to write outputs (Directly on maestro here)
+working_dir="/Volumes/gem-calc/Users/Matthieu/MOAASR/" 
+
+# List all trees available
+tree_files <- list.files(path = trees_dir, full.names = T, pattern = "treefile")
+
+# Faster function to write a table for each species (Taxa:Family presence/absence)
+write_it <- function(col){
+  to_select <- c("id", col)
+  to_write <- pangenome_ready %>%
+      select(all_of(to_select))
+  fwrite(to_write, file = paste0(output_pan, "/", col, ".csv"), buffMB = 2, nThread = 1) # optimised parameters to work with furrr
+}
+
+# Loop through each species to 1) midpoint root the tree, 2) write independant tables for each taxa:family 
+for (tree in tree_files){
+  
+  ## Create directories
+  species_id = substr(basename(tree), 1, 7)
+  dir.create( paste(working_dir, species_id, sep = "/"), recursive = T)
+  output_tree <- paste(working_dir, species_id, sep = "/")
+  dir.create( paste(output_tree, "Pangenome_fam", sep = "/"), recursive = T)
+  output_pan <- paste(output_tree, "Pangenome_fam", sep = "/")
+  
+  ## Midpoint root tree, rename each node with the UFB value appended after 'bb' (e.g. n2_bb100)
+  tree_var <- phytools::read.newick(tree)
+  midpointrooted <- phytools::midpoint.root(tree_var)
+  ## Remove if you dont have node labels ..
+  midpointrooted$node.label <- paste("n", c("ROOT", 2:midpointrooted$Nnode), paste("bb", midpointrooted$node.label, sep=""), sep="")
+  ## Write tree
+  write.tree(midpointrooted, file = paste0(output_tree, "/" , species_id, ".nwk"))
+  
+  ## Read the pangenome file (This is dirty I should use a clean regex)
+  pangenome_raw <- fread(file = paste0(pangenome_dir, "/", "PanGenome-", species_id, ".0321.All.prt-clust-0.8-mode1-th8.lst.quali.txt"), header =   T) ## dirty ##
+  
+  ## Rename gene families for clarity
+  colnames(pangenome_raw) <- paste0("fam_", colnames(pangenome_raw))
+  
+  ## Rename 1st column as id for better pastml compatibility
+  pangenome_ready <- pangenome_raw %>% 
+    rename("id" = 1) %>% 
+    as_tibble()
+  
+  ## Free up some memory 
+  remove(pangenome_raw)
+  
+  ## Write each table for each family very very very fast. Could be faster with vroom ?
+  ## Write in a trash variable to avoir long printed output
+  trash_var <- colnames(pangenome_ready)[2:NCOL(pangenome_ready)] %>% 
+  future_map(.f = ~write_it(.x)) 
+  
+  ## Free up some memory
+   remove(pangenome_ready)
+} 
+
+species_ids = as.data.frame(substr(basename(tree_files), 1, 7) )
+fwrite(x = species_ids, file = paste0(working_dir, "/species_list.txt"), col.names = F)
+
+```
+
+# Step 2
+
+Step 2 runs on maestro with the dedicated script. 
+
+Make sure pastml is installed. One way to do it is to install miniconda on your home and install it yourself with pip.
+Or just module load if it's installed. 
+
+```{bash}
+## Connect to maestro
+ssh mahaudiq@maestro.pasteur.fr
+## Cd to your home
+cd 
+# Put this script in your home : https://docs.conda.io/en/latest/miniconda.html#linux-installers
+# Miniconda3 Linux 64-bit
+bash Miniconda3-latest-Linux-x86_64.sh
+# Once done restart your session !
+# Update conda
+conda update -n base -c defaults conda
+# Don't start automatically:
+conda config --set auto_activate_base false
+# Create env
+conda create -n pastmlenv
+# Load env
+conda activate pastmlenv
+# Install pip
+conda install pip
+# Install pastml
+pip install pastml
+```
+
+Once you have pastml on the cluster. 
+Do not do this from  Rstudio! It will take longer than in the terminal.
+
+```{}
+## Connect to maestro
+ssh mahaudiq@maestro.pasteur.fr
+## Go to the working directory corresponding to previous step 
+cd /pasteur/zeus/projets/p02/gem-calc/Users/Matthieu/MOAASR/
+## Activate pastml environment 
+conda activate pastmlenv
+## Launch script
+./2_maestro_MOAASR.sh
+## Check it's finished 
+squeue -u <user>
+```
+
+
+# Step 3 
+
+ASR aggregation
+
+```{r}
+library(dplyr)
+library(data.table)
+library(furrr)
+
+working_dir="/Volumes/gem-calc/Users/Matthieu/MOAASR/" 
+species_id=list.dirs(working_dir, recursive = F, full.names = F)
+## Paralell computing
+plan(multisession, workers = availableCores())
+
+for (species in species_id){
+  ## Directory containing the ASR for each gene family
+  ASR_dir = paste0(working_dir, "/", species, "/ASR/")
+  
+  ## Check if it was already done (you can safely re-run)
+  if (! file.exists(paste0(working_dir, "/", species,  "/", species, ".csv"))){
+    
+    print(species)
+      
+      ASR_files <- list.files(path = ASR_dir, pattern = ".res", recursive = T, full.names = T)
+      fam_files <- list.files(path = paste0(working_dir, "/", species, "/Pangenome_fam"), pattern = ".csv", recursive = F)
+      ## Check all families have an ASR file
+      if (length(ASR_files)==length(fam_files)){
+      
+        all_asr <- ASR_files %>% 
+          furrr::future_map_dfc(.x = ., ~fread(file = .x, header = T, nThread = 1)) %>% 
+          as_tibble()
+          
+        all_asr_table <- all_asr %>% 
+          select(-contains("node"))
+        
+        ids <- all_asr %>%
+          select(`node...1`) %>% 
+          rename(label = `node...1`)
+        
+        tidy_ASR <- bind_cols(ids, all_asr_table) %>% 
+          tidyr::separate(label, into = c("label", "ufb"), sep = "bb")
+        
+        fwrite(tidy_ASR, file = paste0(working_dir, "/", species,  "/", species, ".csv"), quote = F, sep = ",")
+        
+        remove(all_asr)
+      }
+  } else {
+print(paste("Already processed:", species))
+}
+}
+
+```
+
+# Step 4
+
+gain/loss/presence/absence table generation
+
+
+
+```{r}
+library(tidyverse)
+library(data.table)
+setDTthreads(threads = 8)
+library(dtplyr)
+#library(treeio)
+#library(tidytree)
+
+working_dir="/Volumes/gem-calc/Users/Matthieu/MOAASR/" 
+species_id=list.dirs(working_dir, recursive = F, full.names = F)
+
+
+# species = "ACIN004"
+
+for (species in species_id){
+  
+  print(species)
+  # Read ASR
+  tidy_ASR <- fread(file = paste0(working_dir, "/", species,  "/", species, ".csv"), header = T)
+  # Read tree
+  tree <- treeio::read.tree(file = paste0(working_dir, "/", species,  "/", species, ".nwk"))
+  # Convert tree to table
+  tree_df <- tidytree::as_tibble(tree)%>% 
+          tidyr::separate(label, into = c("label", "ufb"), sep = "bb")
+  # Make an annotation tree df with child states
+  tree_df_child <- tree_df %>%
+    select(parent, label) %>%
+    distinct() %>%
+    left_join(tidy_ASR, by = "label") %>% 
+    pivot_longer(4:ncol(.), values_to = "child_state") %>% 
+    select(-ufb)
+  # Make an annotation tree df with parent states
+  tree_df_parent <- tree_df %>%
+    select(parent) %>%
+    left_join(tree_df, by = c("parent"="node"), suffix = c("", "_parent")) %>% 
+    select(parent, label) %>% 
+    distinct() %>% 
+    rename(label_parent = label) %>%
+    left_join(tidy_ASR, by = c("label_parent"="label")) %>% 
+    pivot_longer(4:ncol(.), values_to = "parent_state") 
+  # Join child and parent states
+  all_df_parent_child <- lazy_dt(tree_df_child) %>%
+    full_join(lazy_dt(tree_df_parent)) 
+  # Free up memory
+  remove(tree_df_child, tree_df_parent)
+  gc()
+  
+  # Read the quantitative pangenome to identify copy number of each gene families
+  # Make an annotation df with each copy number for each gene family for each genome
+  copy_number_terminal <- fread(file = paste0(pangenome_dir, "/", "PanGenome-", species, ".0321.All.prt-clust-0.8-mode1-th8.lst.quanti.txt"), header =   T) %>% 
+    as_tibble() %>% 
+  rename(label = fam_num) %>% 
+    pivot_longer(2:ncol(.)) %>% 
+    mutate(
+      name = paste0("fam_", name)
+    ) %>% 
+    rename(copy_number = value) %>% 
+    select(label, name, copy_number) %>% 
+    lazy_dt(.)
+  
+  # Build the gain/loss/persistence/absence table based on parent/child states
+  gain_loss_all <- all_df_parent_child %>%
+    mutate(
+      event = case_when(
+        child_state == 1 & parent_state == 0 ~ "gain",
+        child_state == 0 & parent_state == 1 ~ "loss",
+        child_state == 1 & parent_state == 1 ~ "persistence",
+        child_state == 0 & parent_state == 0 ~ "absence"
+      )
+    ) %>% 
+    select(-ufb) %>% 
+    left_join(select(tree_df, -parent)) %>% 
+    left_join(copy_number_terminal) %>% # Add copy number on terminal branches
+    mutate(
+      is_terminal = if_else(is.na(copy_number), F, T) # Annotate terminal branches
+    ) %>% 
+    select(-node, -parent) %>% 
+    as_tibble()
+  
+  
+  fwrite(gain_loss_all, file = paste0(working_dir, "/", species,  "/", species, "_results.csv"), quote = F, sep = ",")
+  
+  
+}
+
