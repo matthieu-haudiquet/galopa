@@ -1,5 +1,5 @@
 ---
-title: "MOAASR"
+title: "GALOPA"
 author: Matthieu Haudiquet
 output: html_notebook
 editor_options: 
