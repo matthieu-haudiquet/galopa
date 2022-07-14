@@ -67,14 +67,10 @@ The approach is schematized below in Figure 18, for a phylogenetic tree and a si
 
 
 
- 
-Figure 1 – GaLoPA approach scheme.
 
 ![image](https://user-images.githubusercontent.com/29577447/179030142-9420ed11-1ab2-4455-975f-5cace2b27546.png)
 
  
-Figure 2 – The annotated output of the GaLoPA pipeline. Each line corresponds to a gene family (“name”), and a branch, with the “label” column corresponding to the offspring node, and the “label_parent” to the parental node. 
- 
 ![image](https://user-images.githubusercontent.com/29577447/179030180-ce24948f-32f8-4ad6-a6f4-44e9acd90be5.png)
 
 
